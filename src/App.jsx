@@ -118,36 +118,27 @@ const FAZE = [
    stavke:["Gletovanje i bojenje","Podne obloge","Unutarnja vrata","Kupatilo i kuhinja","Završne instalacije"]},
 ];
 
-const INIT_UPITI = [
-  {id:"u1",datum:"2025-05-14 09:32",status:"nov",imaProjekat:"da",odabraneFaze:[],
-   ime:"Petar Nikolić",telefon:"+387 65 234 567",email:"petar@gmail.com",
-   napomena:"Da li je moguć popust za veće količine betona?",
-   upitnik:{finansiranje:"samofinansiranje",lokacija:"Cara Dušana 12",grad:"Banja Luka",ravnoZemljiste:true,pristupniPut:true,gradjevinDozvola:false,strujaVoda:true,pocetakRadova:"2025-06-01",temelji:"trake",krov:"dvije"},
-   stavke:[{naziv:"Betoniranje temelja MB 25",kolicina:12,jm:"m³",cijena:145},{naziv:"Armirano-betonska ploča",kolicina:80,jm:"m²",cijena:65},{naziv:"Zidanje blok opekom 25cm",kolicina:120,jm:"m²",cijena:38}]},
-  {id:"u2",datum:"2025-05-13 14:15",status:"pregledano",imaProjekat:"ne",odabraneFaze:["f1","f2"],
-   ime:"Ana Kovačević",telefon:"+387 61 345 678",email:"ana.kovacevic@outlook.com",
-   napomena:"Radovi bi trebali početi u junu.",
-   upitnik:{finansiranje:"stambeni",lokacija:"Ulica Kralja Petra 5",grad:"Sarajevo",ravnoZemljiste:false,pristupniPut:true,gradjevinDozvola:true,strujaVoda:true,pocetakRadova:"2025-07-15",temelji:"ploca",krov:"ravni"},
-   stavke:[]},
-  {id:"u3",datum:"2025-05-11 11:00",status:"potvrdjeno",imaProjekat:null,odabraneFaze:[],
-   ime:"Miroslav Janković",telefon:"+387 66 456 789",email:"",napomena:"",upitnik:null,
-   stavke:[{naziv:"Mašinski iskop",kolicina:45,jm:"m³",cijena:12},{naziv:"Postavljanje keramike",kolicina:60,jm:"m²",cijena:22}]},
-];
-
 const INIT_PROFIL = {naziv:"Vaš Izvođač d.o.o.",telefon:"+387 65 123 456",email:"info@vasizvođač.ba",adresa:"Banja Luka, BiH",pdv:"",opis:"Kvalitetna gradnja po pristupačnim cijenama. Više od 15 godina iskustva."};
-const ADMIN_PASS = "admin123";
 
 const fmtKM = (n) => Number(n).toLocaleString("bs-BA",{minimumFractionDigits:2,maximumFractionDigits:2})+" KM";
 const genId = () => Math.random().toString(36).slice(2,9);
 
 // ─── SUPABASE ────────────────────────────────────────────────────────────────
 
-// Auth
-async function login(username, password) {
+// Auth — real Supabase Auth. Password hashing/verification is handled by
+// Supabase itself; korisnici is just the profile row (uloga/firma_id) keyed
+// by the same id as auth.users.
+async function login(email, password) {
   try {
-    const {data,error} = await supabase.from('korisnici').select('*').eq('username',username).eq('password_hash',password).single();
-    if(error||!data) return null;
-    return data;
+    const {data,error} = await supabase.auth.signInWithPassword({email,password});
+    if(error||!data?.user) return null;
+    return await getKorisnikProfil(data.user.id);
+  } catch { return null; }
+}
+async function getKorisnikProfil(userId) {
+  try {
+    const {data} = await supabase.from('korisnici').select('*').eq('id',userId).single();
+    return data||null;
   } catch { return null; }
 }
 async function getFirma(firmaId) {
@@ -170,15 +161,23 @@ async function getAllFirme() {
 }
 async function getAllKorisnici() {
   try {
-    const {data} = await supabase.from('korisnici').select('id,username,uloga,firma_id,created_at').order('created_at');
+    const {data} = await supabase.from('korisnici').select('id,email,uloga,firma_id,created_at').order('created_at');
     return data||[];
   } catch { return []; }
 }
-async function updatePassword(korisnikId, newPassword) {
+// Resetting ANOTHER user's password, or creating/deleting an account, needs
+// the service role key — routed through the admin-users edge function, which
+// re-checks server-side that the caller is a superadmin before doing anything.
+async function invokeAdminUsers(method, path, body) {
   try {
-    await supabase.from('korisnici').update({password_hash:newPassword}).eq('id',korisnikId);
-    return true;
-  } catch { return false; }
+    const {data,error} = await supabase.functions.invoke(`admin-users${path||""}`, {method,body});
+    if(error) return {error:error.message};
+    return data;
+  } catch(e) { return {error:e.message}; }
+}
+async function updatePassword(korisnikId, newPassword) {
+  const res = await invokeAdminUsers("PATCH", `/${korisnikId}`, {password:newPassword});
+  return !res?.error;
 }
 async function dodajFirmu(naziv, slug) {
   try {
@@ -186,14 +185,13 @@ async function dodajFirmu(naziv, slug) {
     return data;
   } catch { return null; }
 }
-async function dodajKorisnika(firmaId, username, password) {
-  try {
-    const {data} = await supabase.from('korisnici').insert({id:genId(),firma_id:firmaId,username,password_hash:password,uloga:'admin'}).select().single();
-    return data;
-  } catch { return null; }
+async function dodajKorisnika(firmaId, email, password) {
+  const res = await invokeAdminUsers("POST", "", {firmaId,email,password});
+  return res?.error ? null : res.data;
 }
 async function obrisiKorisnika(id) {
-  try { await supabase.from('korisnici').delete().eq('id',id); return true; } catch { return false; }
+  const res = await invokeAdminUsers("DELETE", `/${id}`);
+  return !res?.error;
 }
 async function obrisiFiremu(id) {
   try { await supabase.from('firme').delete().eq('id',id); return true; } catch { return false; }
@@ -290,16 +288,16 @@ const Sekcija = ({label,children,required}) => (
 
 // ─── ADMIN LOGIN ──────────────────────────────────────────────────────────────
 function AdminLogin({onLogin,onCancel,firmaSlug}) {
-  const [username,setUsername] = useState("");
+  const [email,setEmail] = useState("");
   const [pass,setPass] = useState("");
   const [err,setErr] = useState("");
   const [loading,setLoading] = useState(false);
 
   const submit = async () => {
-    if(!username||!pass)return;
+    if(!email||!pass)return;
     setLoading(true);setErr("");
-    const korisnik = await login(username, pass);
-    if(!korisnik){setErr("Pogrešno korisničko ime ili lozinka.");setLoading(false);return;}
+    const korisnik = await login(email, pass);
+    if(!korisnik){setErr("Pogrešan email ili lozinka.");setLoading(false);return;}
     if(korisnik.uloga==="admin" && firmaSlug) {
       const firma = await getFirma(korisnik.firma_id);
       if(!firma||firma.slug!==firmaSlug){setErr("Nemate pristup ovoj firmi.");setLoading(false);return;}
@@ -319,7 +317,7 @@ function AdminLogin({onLogin,onCancel,firmaSlug}) {
             <h2 style={{fontFamily:C.font,fontSize:22,fontWeight:700,margin:"0 0 4px"}}>Admin panel</h2>
             <p style={{fontSize:13,color:C.dim,margin:0}}>{firmaSlug?`Firma: ${firmaSlug}`:"Prijava"}</p>
           </div>
-          <input placeholder="Korisničko ime" value={username} onChange={e=>{setUsername(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp(),marginBottom:10}}/>
+          <input type="email" placeholder="Email" value={email} onChange={e=>{setEmail(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp(),marginBottom:10}}/>
           <input type="password" placeholder="Lozinka" value={pass} onChange={e=>{setPass(e.target.value);setErr("");}} onKeyDown={e=>e.key==="Enter"&&submit()} style={{...inp(),border:`1px solid ${err?C.red:C.border2}`,marginBottom:8}}/>
           {err&&<p style={{fontSize:12,color:C.red,margin:"0 0 8px"}}>{err}</p>}
           <button onClick={submit} disabled={loading} style={{...btn("gold"),width:"100%",padding:"11px",fontSize:14}}>{loading?"Provjera...":"Prijavi se"}</button>
@@ -456,7 +454,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
   // Stats
   const stats = useMemo(()=>{
     const uk = upiti.reduce((s,u)=>s+u.stavke.reduce((ss,x)=>ss+x.kolicina*x.cijena,0),0);
-    const ukFaze = upiti.reduce((s,u)=>s+FAZE.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((ss,f)=>ss+f.cijena,0),0);
+    const ukFaze = upiti.reduce((s,u)=>s+fazeList.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((ss,f)=>ss+f.cijena,0),0);
     return {
       total: upiti.length,
       novi: upiti.filter(u=>u.status==="nov").length,
@@ -578,7 +576,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
           <h3 style={{fontSize:15,fontWeight:600,margin:"0 0 1rem"}}>Zadnji upiti</h3>
           <div style={{display:"flex",flexDirection:"column",gap:8}}>
             {upiti.slice(0,5).map(u=>{
-              const uk=u.stavke.reduce((s,x)=>s+x.kolicina*x.cijena,0)+FAZE.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((s,f)=>s+f.cijena,0);
+              const uk=u.stavke.reduce((s,x)=>s+x.kolicina*x.cijena,0)+fazeList.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((s,f)=>s+f.cijena,0);
               return (
                 <div key={u.id} onClick={()=>{setTab("upiti");setOdabraniUpit(u);}} style={{...card(),padding:"12px 16px",display:"flex",alignItems:"center",gap:12,cursor:"pointer",transition:"box-shadow 0.15s"}}>
                   <div style={{width:36,height:36,borderRadius:10,background:C.bg2,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>👤</div>
@@ -611,7 +609,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
             <div style={{flex:1,overflow:"auto"}}>
               {filtrirani.length===0&&<p style={{fontSize:13,color:C.dim,padding:"1rem",textAlign:"center"}}>Nema rezultata</p>}
               {filtrirani.map(u=>{
-                const uk=u.stavke.reduce((s,x)=>s+x.kolicina*x.cijena,0)+FAZE.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((s,f)=>s+f.cijena,0);
+                const uk=u.stavke.reduce((s,x)=>s+x.kolicina*x.cijena,0)+fazeList.filter(f=>u.odabraneFaze?.includes(f.id)).reduce((s,f)=>s+f.cijena,0);
                 const akt=odabraniUpit?.id===u.id;
                 return (
                   <div key={u.id} onClick={()=>{setOdabraniUpit(u);setKorekcija({});setFazaOtvorena(null);if(u.status==="nov")promijeniStatus(u.id,"pregledano");}}
@@ -657,7 +655,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
                     {label:"Telefon",val:odabraniUpit.telefon,ikona:"📞"},
                     {label:"Email",val:odabraniUpit.email||"—",ikona:"📧"},
                     {label:"Projekat",val:odabraniUpit.imaProjekat==="da"?"✓ Ima projekat":odabraniUpit.imaProjekat==="ne"?"✗ Nema":"—",ikona:"📋"},
-                    {label:"Faze",val:odabraniUpit.odabraneFaze?.length>0?odabraniUpit.odabraneFaze.map(f=>({f1:"F1",f2:"F2",f3:"F3"}[f])).join(", "):"—",ikona:"📊"},
+                    {label:"Faze",val:odabraniUpit.odabraneFaze?.length>0?odabraniUpit.odabraneFaze.map(f=>fazeList.find(x=>x.id===f)?.naziv.split("—")[0].trim()||f).join(", "):"—",ikona:"📊"},
                   ].map(f=>(
                     <div key={f.label} style={{...card(),padding:"10px 14px"}}>
                       <p style={{fontSize:11,color:C.dim,margin:"0 0 3px"}}>{f.ikona} {f.label}</p>
@@ -711,7 +709,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
                   <div style={{marginBottom:"1.5rem"}}>
                     <p style={{fontSize:11,color:C.dim,fontWeight:600,letterSpacing:"0.08em",textTransform:"uppercase",margin:"0 0 10px"}}>Odabrane faze</p>
                     <div style={{display:"flex",flexDirection:"column",gap:8}}>
-                      {FAZE.filter(f=>odabraniUpit.odabraneFaze.includes(f.id)).map(f=>{
+                      {fazeList.filter(f=>odabraniUpit.odabraneFaze.includes(f.id)).map(f=>{
                         const fazeStavkeU=(odabraniUpit.stavke||[]).filter(s=>s.faza===f.id);
                         const otvoren=fazaOtvorena===f.id;
                         const ukF=fazeStavkeU.reduce((s,x)=>s+x.kolicina*x.cijena,0);
@@ -754,7 +752,7 @@ function AdminPanel({kategorije:katInit,setKategorije:syncKategorije,upiti,setUp
                       <div style={{...card(),padding:"12px 20px",display:"flex",justifyContent:"flex-end"}}>
                         <div style={{textAlign:"right"}}>
                           <p style={{fontSize:11,color:C.dim,margin:"0 0 2px"}}>Okvirno ukupno</p>
-                          <p style={{fontSize:20,fontWeight:700,color:C.gold,margin:0}}>~{FAZE.filter(f=>odabraniUpit.odabraneFaze.includes(f.id)).reduce((s,f)=>s+f.cijena,0).toLocaleString("bs-BA")} KM</p>
+                          <p style={{fontSize:20,fontWeight:700,color:C.gold,margin:0}}>~{fazeList.filter(f=>odabraniUpit.odabraneFaze.includes(f.id)).reduce((s,f)=>s+f.cijena,0).toLocaleString("bs-BA")} KM</p>
                         </div>
                       </div>
                     </div>
@@ -1141,7 +1139,7 @@ const ChoiceBtn = ({label,aktivan,onClick,ikona}) => (
 );
 
 // ─── PROMJENA LOZINKE ────────────────────────────────────────────────────────
-function PromijeniLozinku({korisnikId,onClose}) {
+function PromijeniLozinku({onClose}) {
   const [stara,setStara] = useState("");
   const [nova,setNova] = useState("");
   const [potvrda,setPotvrda] = useState("");
@@ -1153,9 +1151,9 @@ function PromijeniLozinku({korisnikId,onClose}) {
     if(nova.length<6){setErr("Nova lozinka mora imati najmanje 6 znakova.");return;}
     if(nova!==potvrda){setErr("Lozinke se ne podudaraju.");return;}
     setLoading(true);setErr("");
-    const res = await updatePassword(korisnikId,nova);
+    const {error} = await supabase.auth.updateUser({password:nova});
     setLoading(false);
-    if(res){setOk(true);setTimeout(onClose,1500);}
+    if(!error){setOk(true);setTimeout(onClose,1500);}
     else setErr("Greška pri promjeni lozinke.");
   };
 
@@ -1195,7 +1193,7 @@ function SuperAdminPanel({onLogout,kategorije:katInit,setKategorije:syncKategori
   const [sviUpiti,setSviUpiti] = useState([]);
   const [loading,setLoading] = useState(true);
   const [novaFirma,setNovaFirma] = useState({naziv:"",slug:""});
-  const [noviKorisnik,setNoviKorisnik] = useState({firmaId:"",username:"",password:""});
+  const [noviKorisnik,setNoviKorisnik] = useState({firmaId:"",email:"",password:""});
   const [poruka,setPoruka] = useState("");
   const [editPassKorisnik,setEditPassKorisnik] = useState(null);
   const [novaLozinka,setNovaLozinka] = useState({});
@@ -1221,10 +1219,10 @@ function SuperAdminPanel({onLogout,kategorije:katInit,setKategorije:syncKategori
   };
 
   const handleDodajKorisnika = async () => {
-    if(!noviKorisnik.firmaId||!noviKorisnik.username||!noviKorisnik.password){flash("Popunite sva polja!");return;}
-    const k = await dodajKorisnika(noviKorisnik.firmaId,noviKorisnik.username,noviKorisnik.password);
-    if(k){setKorisnici(p=>[...p,k]);setNoviKorisnik({firmaId:"",username:"",password:""});flash("Korisnik dodan ✓");}
-    else flash("Greška — korisničko ime možda već postoji.");
+    if(!noviKorisnik.firmaId||!noviKorisnik.email||!noviKorisnik.password){flash("Popunite sva polja!");return;}
+    const k = await dodajKorisnika(noviKorisnik.firmaId,noviKorisnik.email,noviKorisnik.password);
+    if(k){setKorisnici(p=>[...p,k]);setNoviKorisnik({firmaId:"",email:"",password:""});flash("Korisnik dodan ✓");}
+    else flash("Greška — email možda već postoji.");
   };
 
   const handleObrisiKorisnika = async (id) => {
@@ -1361,7 +1359,7 @@ function SuperAdminPanel({onLogout,kategorije:katInit,setKategorije:syncKategori
                 <div key={k.id} style={{...card(),padding:"14px 18px"}}>
                   <div style={{display:"flex",alignItems:"center",gap:12}}>
                     <div style={{flex:1}}>
-                      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:600}}>{k.username}</p>
+                      <p style={{margin:"0 0 2px",fontSize:14,fontWeight:600}}>{k.email}</p>
                       <p style={{margin:0,fontSize:12,color:C.muted}}>{firma?.naziv||"—"} · {k.uloga}</p>
                     </div>
                     <button onClick={()=>setEditPassKorisnik(editingPass?null:k.id)} style={btn("ghost",{fontSize:12,padding:"5px 12px"})}>🔑 Lozinka</button>
@@ -1389,8 +1387,8 @@ function SuperAdminPanel({onLogout,kategorije:katInit,setKategorije:syncKategori
                 </select>
               </div>
               <div style={{flex:1,minWidth:120}}>
-                <p style={{fontSize:11,color:C.dim,margin:"0 0 4px"}}>Korisničko ime</p>
-                <input placeholder="username" value={noviKorisnik.username} onChange={e=>setNoviKorisnik(p=>({...p,username:e.target.value}))} style={inp({padding:"8px 12px",fontSize:13})}/>
+                <p style={{fontSize:11,color:C.dim,margin:"0 0 4px"}}>Email</p>
+                <input type="email" placeholder="email@firma.ba" value={noviKorisnik.email} onChange={e=>setNoviKorisnik(p=>({...p,email:e.target.value}))} style={inp({padding:"8px 12px",fontSize:13})}/>
               </div>
               <div style={{flex:1,minWidth:120}}>
                 <p style={{fontSize:11,color:C.dim,margin:"0 0 4px"}}>Lozinka</p>
@@ -1498,7 +1496,22 @@ export default function App() {
     else setAdminView("panel");
   };
 
-  const handleLogout = () => { setKorisnik(null); setAdminView(null); };
+  const handleLogout = () => { supabase.auth.signOut(); setKorisnik(null); setAdminView(null); };
+
+  // Keep an admin logged in across a page refresh by restoring their Supabase
+  // Auth session, then looking up their role/firma_id from korisnici.
+  useEffect(()=>{
+    let active = true;
+    supabase.auth.getSession().then(async ({data:{session}})=>{
+      if(!session||!active) return;
+      const profil = await getKorisnikProfil(session.user.id);
+      if(profil&&active) handleLogin(profil);
+    });
+    const {data:sub} = supabase.auth.onAuthStateChange((event)=>{
+      if(event==="SIGNED_OUT"){ setKorisnik(null); setAdminView(null); }
+    });
+    return ()=>{ active=false; sub.subscription.unsubscribe(); };
+  },[]);
 
   const [stavke,setStavke] = useState({});
   const [kontakt,setKontakt] = useState({ime:"",telefon:"",email:"",napomena:""});
@@ -1564,7 +1577,7 @@ export default function App() {
         onLogout={handleLogout}
         onChangePass={()=>setShowChangePass(true)}
       />
-      {showChangePass&&korisnik&&<PromijeniLozinku korisnikId={korisnik.id} onClose={()=>setShowChangePass(false)}/>}
+      {showChangePass&&korisnik&&<PromijeniLozinku onClose={()=>setShowChangePass(false)}/>}
     </>
   );
 
